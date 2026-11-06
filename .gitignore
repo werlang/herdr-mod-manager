@@ -1,0 +1,4 @@
+gpui-kit.d.ts
+jsconfig.json
+.cache-*
+__pycache__
