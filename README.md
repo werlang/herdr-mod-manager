@@ -37,20 +37,28 @@ Herdr redraws from the files within a second, so the switch applies live.
 - the folders it adds. A taken name gets a free one (`name-2`), with its `mods/<name>/` asset paths, self-opening overlays and key commands renamed;
 - the keys from its `keys.json` it adds. A key you already use is never replaced; the prompt says which ones were kept.
 
-After `herdr-app check` passes, the install is recorded in `mods-disabled/.mod-manager-sources.json` (listing and commit).
+After `herdr-app check` passes, the install is recorded in `mods-disabled/.mod-manager-sources.json`: the listing, the commit, and the mod folder's git tree hash.
 
-**Updating** happens when the listing's commit differs from the recorded one. It downloads the new commit and asks:
+**What counts as an update.** The index only has each repo's latest commit, which moves for any change: a README, a test, a sibling mod in the same repo. So the commit is only a hint. When it moves, one GitHub call per listing (`/repos/<owner>/<repo>/contents/<path>/mods?ref=<commit>`) returns each mod folder's tree hash. An update is offered only if that hash differs from the installed one; otherwise the recorded commit just moves forward.
+
+- **Hashing:** done locally with `git` in a scratch repo, so the installed folder is only read. The local hash matches GitHub's.
+- **Rate limit:** GitHub allows 60 unauthenticated calls an hour. When refused, lookups pause for an hour ("GitHub limit, checking later"), and nothing is offered in the meantime.
+- **Download double-check:** before asking, the downloaded folder is hashed again. If it's unchanged, you get "up to date" and no prompt.
+
+**Updating** downloads the new commit and asks:
 
 - **Replace**: your folder is swapped for the new one. The old one is kept as `mods-disabled/<name>.old-<time>`, and if the new one fails `herdr-app check`, yours is put back.
 - **Keep mine as a clone**: `mod.clone` saves your copy as `<name>-mine` first, then replaces.
 - **Cancel**.
+
+If you edited the installed copy (its hash differs from the one recorded at install), the prompt says so and leads with **Keep mine as a clone**.
 
 **When it checks**: the index is cached in `mods-disabled/.mod-manager-cache/index.json` and shown right away. It is fetched again when the screen opens, on the refresh button, and once a day by `usage-status` (whose puzzle icon then shows the update count). The count lives in `mods-disabled/.mod-manager-updates.json`.
 
 ## Requirements
 
 - Herdr app 0.1.13 or newer.
-- macOS or Linux (folders are moved with `mv`; downloads use `curl` and `tar`).
+- macOS or Linux (folders are moved with `mv`; downloads use `curl` and `tar`; folder hashes use `git`).
 
 ## Install
 

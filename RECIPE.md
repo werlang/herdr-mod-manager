@@ -25,7 +25,8 @@ A **Mods** settings screen: every installed Herdr mod with an on/off switch, a *
 - Shipped layouts and shipped mods are never edited.
 - Delete (asks first): out of layouts as with Off, then the folder goes to the system Trash (`mv` to `~/.Trash`, Finder via `osascript` if that's refused; `gio trash` or `rm -rf` on Linux). Its disable record and source record go; key bindings stay.
 - Install: the repo tarball at `headCommit` is unpacked in `mods-disabled/.mod-manager-cache/dl-*`, scanned (network, programs, outside files) and shown before anything is written. Taken names become `name-2` with paths renamed. Keys are merged without replacing yours. The install is recorded in `mods-disabled/.mod-manager-sources.json`.
-- Update (recorded commit ≠ listed commit): **Replace** (old folder kept as `mods-disabled/<name>.old-<time>`, restored if `herdr-app check` fails), **Keep mine as a clone** (`herdr-app do mod.clone` to `<name>-mine`, then replace), or **Cancel**.
+- What counts as an update: the index's `headCommit` is the repo's, so it moves for any change. When it moves, `api.github.com/repos/<repo>/contents/<path>/mods?ref=<commit>` gives each mod folder's git tree hash (one call per listing; 1 h pause after a 403/429). Only a hash different from the one recorded at install (computed with `git add -A -f` + `write-tree` in a scratch repo) counts. An unchanged hash moves the recorded commit forward. The download is hashed again before asking.
+- Update: **Replace** (old folder kept as `mods-disabled/<name>.old-<time>`, restored if `herdr-app check` fails), **Keep mine as a clone** (`herdr-app do mod.clone` to `<name>-mine`, then replace), or **Cancel**. An edited copy (hash ≠ the one after install) is flagged, and **Keep mine as a clone** comes first.
 - The index is cached (`mods-disabled/.mod-manager-cache/index.json`) and fetched again on open, on refresh, and once a day by `usage-status`, which reads `mods-disabled/.mod-manager-updates.json` for its badge.
 
 ## Built from
@@ -40,7 +41,7 @@ A **Mods** settings screen: every installed Herdr mod with an on/off switch, a *
 - Herdr's Settings window can't take mod sections; this is a separate settings-style dialog.
 - Re-running a repo's `sync.sh` turns its mods back on.
 - Bindings to an off mod's commands stay in `keys.json` and do nothing while it's off.
-- macOS/Linux only (`mv`, `curl`, `tar`).
+- macOS/Linux only (`mv`, `curl`, `tar`, `git`).
 - `exec` has a 30 s limit, so a very large repo may not download.
 - Don't link mods you sync from a local repo; the update and the sync would overwrite each other.
 
