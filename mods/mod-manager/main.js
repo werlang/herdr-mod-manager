@@ -19,9 +19,12 @@
 // at the listed commit, shows what the code reaches (network, programs,
 // files) and asks; a taken folder name gets a free one, with its asset paths
 // renamed; its keys.json is merged without replacing any key you use. Each
-// install is recorded in mods-disabled/.mod-manager-sources.json, which is
-// how updates are found: the listing's commit moved on. An update asks:
-// replace your copy, keep yours as a clone first, or cancel.
+// install is recorded in mods-disabled/.mod-manager-sources.json with the
+// git tree hash of the mod's folder. The index only has the repo's latest
+// commit, which moves for any change (a README, a sibling mod), so a moved
+// commit is looked up on GitHub (one call per listing) and only a changed
+// folder hash counts as an update. An update asks: replace your copy, keep
+// yours as a clone first, or cancel.
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
@@ -50,7 +53,11 @@ import {
   entryKey,
   entryUrl,
   tarballUrl,
+  contentsUrl,
+  treesFromContents,
   sourceRecord,
+  resolveSource,
+  lookupsNeeded,
   pendingUpdates,
   candidatesFor,
   installedFrom,
@@ -62,6 +69,12 @@ import {
 } from "./catalog.js";
 
 const I = (name) => `mods/${SELF}/${name}.svg`;
+
+/** How long to wait after GitHub refuses a lookup (rate limit: 60 an hour). */
+const GITHUB_BACKOFF_MS = 60 * 60 * 1000;
+
+/** How many listings one check looks up on GitHub, at most. */
+const LOOKUPS_PER_CHECK = 20;
 
 /** How many Browse rows are drawn before "Show more". */
 const PAGE = 40;
@@ -347,6 +360,7 @@ export default class ModManager extends View {
       }
       delete this.busy[id];
       await this.scan().catch(() => null);
+      await this.resolveUpdates().catch(() => null);
       await this.writeUpdates().catch(() => null);
       cx.notify();
     });
@@ -444,12 +458,50 @@ export default class ModManager extends View {
       this.index = { fetchedAt, ...parsed };
       await fs.mkdir(this.cacheDir, { recursive: true });
       await fs.writeFile(this.indexPath, JSON.stringify({ fetchedAt, index: json }));
-      await this.writeUpdates();
     } catch (e) {
       this.fetchError = message(e);
     }
+    if (this.index && this.mods) {
+      await this.resolveUpdates().catch(() => null);
+      await this.writeUpdates().catch(() => null);
+    }
     this.fetching = false;
     cx.notify();
+  }
+
+  /**
+   * Turns "the repo moved" into "this mod changed": fills in hashes missing
+   * from older records, then looks moved listings up on GitHub. A listing
+   * whose folder hash is unchanged just moves its recorded commit forward.
+   */
+  async resolveUpdates() {
+    if (!this.mods) return;
+    let changed = false;
+    // Records from before hashes (or linked by hand): hash the installed copy.
+    for (const [name, source] of Object.entries(this.sources)) {
+      if (source.localTree) continue;
+      const mod = this.mods.find((m) => m.name === name);
+      const hash = mod ? await this.treeHash(`${mod.enabled ? this.modsDir : this.parkDir}/${name}`) : null;
+      if (!hash) continue;
+      this.sources[name] = { ...source, localTree: hash, tree: source.tree ?? (name === source.modName ? hash : null) };
+      changed = true;
+    }
+    if (Date.now() - (this.githubRefusedAt ?? 0) >= GITHUB_BACKOFF_MS) {
+      for (const { entry, names } of lookupsNeeded(this.sources, this.entries).slice(0, LOOKUPS_PER_CHECK)) {
+        const res = await fetch(contentsUrl(entry), { headers: { Accept: "application/vnd.github+json", "User-Agent": "herdr-mod-manager" } }).catch(() => null);
+        if (!res) break; // offline: try again next time
+        if (res.status === 403 || res.status === 429) {
+          this.githubRefusedAt = Date.now();
+          break;
+        }
+        const trees = res.ok ? treesFromContents(await res.json().catch(() => null)) : {};
+        // 404: the listing's mods/ folder is gone at that commit.
+        if (!res.ok && res.status !== 404) continue;
+        for (const name of names) this.sources[name] = resolveSource(this.sources[name], entry, trees[this.sources[name].modName] ?? null);
+        changed = true;
+      }
+    }
+    if (changed) await this.writeSources();
   }
 
   get entries() { return this.index?.mods ?? []; }
@@ -533,6 +585,28 @@ export default class ModManager extends View {
     if (r.code !== 0) throw new Error((r.stderr || r.stdout || "herdr-app check failed").trim());
   }
 
+  /**
+   * The git tree hash of a folder, the same one GitHub reports for it, or
+   * null when git isn't there. Hashed in a scratch repo, so the folder is
+   * only read; every file counts (no ignore rules) except Finder's .DS_Store.
+   */
+  async treeHash(folder) {
+    if (!(await fs.exists(folder))) return null;
+    const gitDir = `${this.cacheDir}/dl-git-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const git = ["-c", "core.autocrlf=false", "-c", "core.excludesFile=/dev/null", "--git-dir", gitDir, "--work-tree", folder];
+    try {
+      await fs.mkdir(this.cacheDir, { recursive: true });
+      await run("git", ["init", "-q", "--bare", gitDir]);
+      await run("git", [...git, "add", "-A", "-f", "--", ".", ":(exclude,glob)**/.DS_Store"], { cwd: folder });
+      const hash = (await run("git", [...git, "write-tree"], { cwd: folder })).stdout.trim();
+      return /^[0-9a-f]{40}$/.test(hash) ? hash : null;
+    } catch {
+      return null;
+    } finally {
+      await this.removeDownload(gitDir);
+    }
+  }
+
   /** Every folder name in use: yours, parked and Herdr's. */
   takenNames() {
     return new Set((this.mods ?? []).map((m) => m.name));
@@ -553,7 +627,7 @@ export default class ModManager extends View {
         const to = freeName(from, taken);
         taken.add(to);
         const text = (await Promise.all((await filesIn(src)).filter((f) => /\.(js|mjs)$/.test(f)).map((f) => fs.readFile(f, "utf8").catch(() => "")))).join("\n");
-        plan.push({ from, to, src, notes: riskNotes(text, from) });
+        plan.push({ from, to, src, notes: riskNotes(text, from), tree: await this.treeHash(src) });
       }
       if (!plan.length) {
         await this.removeDownload(dl.dir);
@@ -600,7 +674,10 @@ export default class ModManager extends View {
       for (const p of done) await move(`${this.modsDir}/${p.to}`, `${dl.dir}/${p.to}.failed`).catch(() => null);
       throw e;
     }
-    for (const p of plan) this.sources[p.to] = sourceRecord(entry, p.from, entry.headCommit);
+    for (const p of plan) {
+      const localTree = await this.treeHash(`${this.modsDir}/${p.to}`);
+      this.sources[p.to] = sourceRecord(entry, p.from, entry.headCommit, { tree: p.tree, localTree, remoteCommit: entry.headCommit, remoteTree: p.tree });
+    }
     await this.writeSources();
     if (keys?.added.length) await writeJson(`${this.home}/keys.json`, keys.merged);
     const names = plan.map((p) => p.to).join(", ");
@@ -619,31 +696,39 @@ export default class ModManager extends View {
         await this.removeDownload(dl.dir);
         throw new Error(`${entry.fullName} no longer has mods/${source.modName}`);
       }
+      // The download itself is the final word: an unchanged folder is no update.
+      const tree = await this.treeHash(src);
+      if (tree && tree === source.tree) {
+        await this.removeDownload(dl.dir);
+        this.sources[name] = { ...source, commit: entry.headCommit, remoteCommit: entry.headCommit, remoteTree: tree };
+        await this.writeSources();
+        notify({ title: `${name} is up to date`, body: "Only other files in its repo changed.", level: "info", timeout: 3500 });
+        return;
+      }
       const text = (await Promise.all((await filesIn(src)).filter((f) => /\.(js|mjs)$/.test(f)).map((f) => fs.readFile(f, "utf8").catch(() => "")))).join("\n");
-      const before = (await readJson(`${this.modsDir}/${name}/mod.json`))?.version;
-      const after = (await readJson(`${src}/mod.json`))?.version;
+      const now = await this.treeHash(`${this.modsDir}/${name}`);
+      const edited = Boolean(source.localTree && now && now !== source.localTree);
       const clone = freeName(`${name}-mine`, this.takenNames());
-      const versions = before && after && before !== after ? `v${before} → v${after}` : `${source.commit ? source.commit.slice(0, 7) : "unknown version"} → ${entry.headCommit.slice(0, 7)}`;
+      const replace = { label: "Replace", run: () => this.update(update, src, tree) };
+      const keep = { label: "Keep mine as a clone", run: () => this.update(update, src, tree, clone) };
       this.ask(cx, {
         id: name,
         title: `Update ${name}?`,
-        subtitle: `${entry.fullName} · ${versions}`,
+        subtitle: `${entry.fullName} · ${source.commit ? source.commit.slice(0, 7) : "linked"} → ${entry.headCommit.slice(0, 7)}`,
         notes: riskNotes(text, source.modName),
         lines: [
+          ...(edited ? ["You changed this copy since it was installed."] : []),
           "Replace: your copy is swapped for the new one (the old folder is kept in mods-disabled/ as a backup).",
           `Keep mine as a clone: your copy is saved as ${clone} first, then this one is updated.`,
         ],
         cleanup: () => this.removeDownload(dl.dir),
-        actions: [
-          { label: "Replace", primary: true, run: () => this.update(update, src) },
-          { label: "Keep mine as a clone", run: () => this.update(update, src, clone) },
-          { label: "Cancel" },
-        ],
+        // Edited copies lead with keeping them; untouched ones with replacing.
+        actions: edited ? [{ ...keep, primary: true }, replace, { label: "Cancel" }] : [{ ...replace, primary: true }, keep, { label: "Cancel" }],
       });
     });
   }
 
-  async update({ name, entry, source }, src, cloneAs = null) {
+  async update({ name, entry, source }, src, tree, cloneAs = null) {
     if (cloneAs) {
       // Herdr's own clone: renames asset paths and records cloned_from.
       await run("herdr-app", ["do", "mod.clone", JSON.stringify({ name, as: cloneAs })]);
@@ -662,7 +747,15 @@ export default class ModManager extends View {
       await move(backup, live);
       throw e;
     }
-    this.sources[name] = { ...source, commit: entry.headCommit, at: new Date().toISOString() };
+    this.sources[name] = {
+      ...source,
+      commit: entry.headCommit,
+      tree,
+      localTree: await this.treeHash(live),
+      remoteCommit: entry.headCommit,
+      remoteTree: tree,
+      at: new Date().toISOString(),
+    };
     await this.writeSources();
     notify({
       title: `${name} updated`,
@@ -679,14 +772,15 @@ export default class ModManager extends View {
     this.ask(cx, {
       id: mod.name,
       title: `Where did ${mod.name} come from?`,
-      subtitle: "Linking lets the updater follow that listing. Its installed version is unknown, so it shows an update right away.",
+      subtitle: "Linking lets the updater follow that listing. Your copy is compared with the published folder: an update shows only if they differ.",
       notes: [],
       lines: [],
       actions: [
         ...candidates.slice(0, 3).map((e) => ({
           label: `${e.fullName}${e.path ? `/${e.path}` : ""}`,
           run: async () => {
-            this.sources[mod.name] = sourceRecord(e, mod.name, null);
+            const hash = await this.treeHash(`${mod.enabled ? this.modsDir : this.parkDir}/${mod.name}`);
+            this.sources[mod.name] = sourceRecord(e, mod.name, null, { tree: hash, localTree: hash });
             await this.writeSources();
           },
         })),
@@ -1149,7 +1243,8 @@ export default class ModManager extends View {
         .hover((s) => s.text_color(t.foreground))
         .on_click((_e, cx) => { this.sort = id; cx.notify(); })
         .child(label);
-    const status = this.fetching ? "Refreshing…" : this.fetchError && this.index ? `Offline: ${this.fetchError}` : `${this.entries.length} mods · ${ago(this.index?.fetchedAt)}`;
+    const limited = Date.now() - (this.githubRefusedAt ?? 0) < GITHUB_BACKOFF_MS ? " · GitHub limit, checking later" : "";
+    const status = this.fetching ? "Refreshing…" : this.fetchError && this.index ? `Offline: ${this.fetchError}` : `${this.entries.length} mods · ${ago(this.index?.fetchedAt)}${limited}`;
     return h_flex()
       .flex_none()
       .pt(8)
