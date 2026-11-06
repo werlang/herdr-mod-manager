@@ -9,6 +9,11 @@ import {
   isStale,
   sourceRecord,
   pendingUpdates,
+  updateState,
+  resolveSource,
+  lookupsNeeded,
+  contentsUrl,
+  treesFromContents,
   candidatesFor,
   installedFrom,
   freeName,
@@ -21,6 +26,8 @@ import {
 
 const C1 = "a".repeat(40);
 const C2 = "b".repeat(40);
+const T1 = "1".repeat(40);
+const T2 = "2".repeat(40);
 const listing = (over = {}) => ({
   owner: "ada",
   repo: "herdr-thing",
@@ -89,17 +96,82 @@ describe("isStale", () => {
   });
 });
 
-describe("pendingUpdates", () => {
-  const entries = [listing()];
-  it("lists installed mods whose listing moved on", () => {
-    const sources = {
-      thing: sourceRecord(listing(), "thing", C1),
-      same: sourceRecord(listing(), "thing", C2),
-      linked: sourceRecord(listing(), "thing", null),
-      gone: { key: "ada/other/", modName: "x", commit: C1 },
-      renamed: { ...sourceRecord(listing(), "nope", C1) },
-    };
-    assert.deepEqual(pendingUpdates(sources, entries).map((u) => u.name), ["linked", "thing"]);
+describe("contentsUrl and treesFromContents", () => {
+  it("asks for the mods folder at the listed commit", () => {
+    assert.equal(contentsUrl(listing()), `https://api.github.com/repos/ada/herdr-thing/contents/mods?ref=${C2}`);
+    assert.equal(contentsUrl(listing({ path: "herdr/x" })), `https://api.github.com/repos/ada/herdr-thing/contents/herdr/x/mods?ref=${C2}`);
+  });
+  it("keeps folder hashes only", () => {
+    const json = [
+      { name: "thing", type: "dir", sha: T1 },
+      { name: "README.md", type: "file", sha: T2 },
+      { name: "../x", type: "dir", sha: T2 },
+      { name: "bad", type: "dir", sha: "nope" },
+    ];
+    assert.deepEqual(treesFromContents(json), { thing: T1 });
+    assert.deepEqual(treesFromContents({ message: "rate limit" }), {});
+  });
+});
+
+describe("updateState", () => {
+  const src = (over = {}) => ({ ...sourceRecord(listing(), "thing", C1, { tree: T1 }), ...over });
+  it("is current on the same commit", () => {
+    assert.equal(updateState(src({ commit: C2 }), listing()), "current");
+  });
+  it("needs a lookup when the commit moved", () => {
+    assert.equal(updateState(src(), listing()), "unknown");
+    assert.equal(updateState(src({ remoteCommit: C1, remoteTree: T2 }), listing()), "unknown", "looked up an older commit");
+  });
+  it("ignores commits that didn't touch the folder", () => {
+    assert.equal(updateState(src({ remoteCommit: C2, remoteTree: T1 }), listing()), "current");
+  });
+  it("offers an update when the folder changed", () => {
+    assert.equal(updateState(src({ remoteCommit: C2, remoteTree: T2 }), listing()), "update");
+    assert.equal(updateState(src({ tree: null, remoteCommit: C2, remoteTree: T2 }), listing()), "update", "no hash known yet");
+  });
+  it("is null when the listing or folder is gone", () => {
+    assert.equal(updateState(src(), undefined), null);
+    assert.equal(updateState(src({ modName: "nope" }), listing()), null);
+    assert.equal(updateState(src({ remoteCommit: C2, remoteTree: null }), listing()), null);
+  });
+});
+
+describe("resolveSource", () => {
+  const src = sourceRecord(listing(), "thing", C1, { tree: T1 });
+  it("moves the commit forward when the folder is unchanged", () => {
+    const next = resolveSource(src, listing(), T1);
+    assert.equal(next.commit, C2);
+    assert.equal(updateState(next, listing()), "current");
+  });
+  it("keeps the commit and records the new hash when it changed", () => {
+    const next = resolveSource(src, listing(), T2);
+    assert.equal(next.commit, C1);
+    assert.equal(next.remoteTree, T2);
+    assert.equal(updateState(next, listing()), "update");
+  });
+  it("leaves the input alone", () => {
+    resolveSource(src, listing(), T1);
+    assert.equal(src.commit, C1);
+  });
+});
+
+describe("pendingUpdates and lookupsNeeded", () => {
+  const other = listing({ fullName: "ada/other", repo: "other", modNames: ["a", "b"] });
+  const sources = {
+    thing: sourceRecord(listing(), "thing", C1, { tree: T1, remoteCommit: C2, remoteTree: T2 }),
+    same: sourceRecord(listing(), "thing", C1, { tree: T1, remoteCommit: C2, remoteTree: T1 }),
+    a: sourceRecord(other, "a", C1, { tree: T1 }),
+    b: sourceRecord(other, "b", C1, { tree: T1 }),
+    gone: { key: "ada/missing/", modName: "x", commit: C1 },
+  };
+  it("lists only real content changes", () => {
+    assert.deepEqual(pendingUpdates(sources, [listing(), other]).map((u) => u.name), ["thing"]);
+  });
+  it("groups lookups per listing", () => {
+    const needed = lookupsNeeded(sources, [listing(), other]);
+    assert.equal(needed.length, 1);
+    assert.equal(needed[0].entry.fullName, "ada/other");
+    assert.deepEqual(needed[0].names, ["a", "b"]);
   });
 });
 

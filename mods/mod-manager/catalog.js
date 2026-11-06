@@ -77,6 +77,29 @@ export function entryUrl(e) {
   return `https://github.com/${e.fullName}/tree/${e.defaultBranch}${e.path ? `/${e.path}` : ""}`;
 }
 
+/**
+ * GitHub's listing of the listing's `mods/` folder at its commit: each mod
+ * folder comes with its git tree hash, which changes only when something in
+ * that folder does. One call covers every mod of the listing.
+ */
+export function contentsUrl(e) {
+  return `https://api.github.com/repos/${e.fullName}/contents/${e.path ? `${e.path}/` : ""}mods?ref=${e.headCommit}`;
+}
+
+/**
+ * Folder name -> tree hash from a contents-API answer; junk is dropped.
+ * @param {any} json
+ * @returns {Record<string, string>}
+ */
+export function treesFromContents(json) {
+  const out = {};
+  if (!Array.isArray(json)) return out;
+  for (const item of json) {
+    if (item?.type === "dir" && isSafeName(item.name) && /^[0-9a-f]{40}$/.test(item.sha)) out[item.name] = item.sha;
+  }
+  return out;
+}
+
 /** The repo at the listed commit, as a .tar.gz. */
 export function tarballUrl(e) {
   return `https://codeload.github.com/${e.fullName}/tar.gz/${e.headCommit}`;
@@ -93,36 +116,102 @@ export function isStale(fetchedAt, now, maxAge = DAY_MS) {
 
 /**
  * What a source record for an installed folder looks like.
+ *
+ * - `commit`: the repo commit last known to hold this content (null when
+ *   linked by hand).
+ * - `tree`: git tree hash of the mod folder as published, before any rename;
+ *   compared with the listing's to tell a real update from other commits.
+ * - `localTree`: tree hash of the installed folder right after installing,
+ *   to tell whether the person edited it since.
+ * - `remoteCommit` / `remoteTree`: the last listing commit looked up on
+ *   GitHub and its tree hash, so each commit is looked up once.
  * @param {object} entry the index listing
  * @param {string} modName folder name inside the listing
- * @param {string | null} commit the commit installed, or null when unknown (linked by hand)
+ * @param {string | null} commit
+ * @param {{ tree?: string | null, localTree?: string | null, remoteCommit?: string | null, remoteTree?: string | null }} [hashes]
  */
-export function sourceRecord(entry, modName, commit) {
+export function sourceRecord(entry, modName, commit, hashes = {}) {
   return {
     key: entryKey(entry),
     fullName: entry.fullName,
     path: entry.path,
     modName,
     commit,
+    tree: hashes.tree ?? null,
+    localTree: hashes.localTree ?? null,
+    remoteCommit: hashes.remoteCommit ?? null,
+    remoteTree: hashes.remoteTree ?? null,
     at: new Date().toISOString(),
   };
 }
 
 /**
- * Installed mods whose listing has a newer commit than the one installed.
- * @param {Record<string, { key: string, modName: string, commit: string | null }>} sources folder -> record
+ * Where an installed mod stands against its listing:
+ * - "current": same commit, or a newer commit whose folder is unchanged;
+ * - "update": the folder's content changed upstream;
+ * - "unknown": the commit moved and its folder hasn't been looked up yet;
+ * - null: no such listing or folder any more.
+ * @param {object} source record from sourceRecord
+ * @param {object | undefined} entry its listing
+ */
+export function updateState(source, entry) {
+  if (!entry || !entry.modNames.includes(source?.modName)) return null;
+  if (entry.headCommit === source.commit) return "current";
+  if (source.remoteCommit !== entry.headCommit) return "unknown";
+  if (!source.remoteTree) return null; // the folder is gone at that commit
+  return source.tree && source.remoteTree === source.tree ? "current" : "update";
+}
+
+/**
+ * A source record after looking its listing's commit up on GitHub. An
+ * unchanged folder moves `commit` forward, so nothing is offered.
+ * @param {object} source
+ * @param {object} entry
+ * @param {string | null} remoteTree the folder's tree hash at entry.headCommit (null: gone)
+ */
+export function resolveSource(source, entry, remoteTree) {
+  const next = { ...source, remoteCommit: entry.headCommit, remoteTree };
+  if (remoteTree && source.tree && remoteTree === source.tree) next.commit = entry.headCommit;
+  return next;
+}
+
+/** Listings in the index, by key. */
+function byKey(entries) {
+  return new Map(entries.map((e) => [entryKey(e), e]));
+}
+
+/**
+ * Installed mods whose published folder changed since they were installed.
+ * @param {Record<string, object>} sources folder -> record
  * @param {object[]} entries parsed index entries
  * @returns {{ name: string, entry: object, source: object }[]}
  */
 export function pendingUpdates(sources, entries) {
-  const byKey = new Map(entries.map((e) => [entryKey(e), e]));
+  const listings = byKey(entries);
   const out = [];
   for (const [name, source] of Object.entries(sources ?? {})) {
-    const entry = byKey.get(source?.key);
-    if (!entry || !entry.modNames.includes(source.modName)) continue;
-    if (entry.headCommit !== source.commit) out.push({ name, entry, source });
+    const entry = listings.get(source?.key);
+    if (updateState(source, entry) === "update") out.push({ name, entry, source });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Listings to look up on GitHub (one call each), with the installed folders
+ * waiting on them.
+ * @returns {{ entry: object, names: string[] }[]}
+ */
+export function lookupsNeeded(sources, entries) {
+  const listings = byKey(entries);
+  const groups = new Map();
+  for (const [name, source] of Object.entries(sources ?? {})) {
+    const entry = listings.get(source?.key);
+    if (updateState(source, entry) !== "unknown") continue;
+    const key = entryKey(entry);
+    if (!groups.has(key)) groups.set(key, { entry, names: [] });
+    groups.get(key).names.push(name);
+  }
+  return [...groups.values()];
 }
 
 /**
