@@ -1,8 +1,8 @@
 {
   "name": "mod-manager",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "title": "Mods",
-  "description": "Settings screen to turn installed Herdr mods on and off, keeping your layouts working",
+  "description": "Settings screen to turn Herdr mods on and off, browse and install mods from herdr.dev, and update them",
   "place": "none",
   "overlay": {
     "kind": "dialog",
