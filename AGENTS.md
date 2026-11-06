@@ -11,6 +11,8 @@ Fonte da verdade do mod `mod-manager`: uma tela **Mods** (estilo settings) que l
 2. A pasta vai para `~/.config/herdr-app/mods-disabled/<nome>` (o Herdr só carrega `mods/`).
 3. As mudanças ficam em `mods-disabled/.mod-manager.json`; ativar move a pasta de volta e desfaz essas mudanças (localizando o nó pelo `id`), sem sobrescrever o que o usuário mudou depois.
 
+Também abre pelo ícone de puzzle na status bar, que o `usage-status` (repo `herdr-usage-status`) mostra quando este mod está instalado.
+
 A tela de Settings nativa do Herdr não aceita seções de mods, por isso o mod é um diálogo próprio.
 
 ## Regra: sempre atualizar a pasta live do Herdr

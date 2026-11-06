@@ -8,6 +8,7 @@ A **Mods** settings screen: every installed Herdr mod with an on/off switch. Off
 
 `cmd-shift-,` (next to Settings' `cmd-,`) opens a dialog titled **Mods**:
 
+- With `usage-status` in the status bar, a puzzle icon there opens it too.
 - A filter box.
 - **Your mods**: one row per mod you installed or cloned, with title, folder, version, description, and where it's used (`Layout: werlang`, `Used by spaces-plus`, `Keys: cmd-w`). A switch on the right; off rows are muted and tagged `off`.
 - **Herdr's mods** (collapsed): the shipped mods, with locked switches.

@@ -41,6 +41,8 @@ Copy/sync `mods/mod-manager` into `~/.config/herdr-app/mods/`, then bind a key (
 { "global": { "cmd-shift-,": "mod.open:mod-manager" } }
 ```
 
+With [`usage-status`](https://github.com/werlang/herdr-usage-status) in your status bar, a puzzle icon there opens it too (it appears by itself once this mod is installed).
+
 Or open it once with:
 
 ```sh
